@@ -25,7 +25,7 @@ from System.Threading.Tasks import Task, TaskScheduler
 clr.AddReference(interop_dll_path('Microsoft.Web.WebView2.Core.dll'))
 clr.AddReference(interop_dll_path('Microsoft.Web.WebView2.WinForms.dll'))
 
-from Microsoft.Web.WebView2.Core import CoreWebView2Cookie, CoreWebView2ServerCertificateErrorAction, CoreWebView2Environment
+from Microsoft.Web.WebView2.Core import CoreWebView2Cookie, CoreWebView2ServerCertificateErrorAction, CoreWebView2Environment, CoreWebView2EnvironmentOptions
 from Microsoft.Web.WebView2.WinForms import CoreWebView2CreationProperties, WebView2
 
 for platform in ('win-arm64', 'win-x64', 'win-x86'):
@@ -39,16 +39,6 @@ class EdgeChrome:
     def __init__(self, form, window, cache_dir):
         self.pywebview_window = window
         self.webview = WebView2()
-        props = CoreWebView2CreationProperties()
-        props.UserDataFolder = cache_dir
-        props.set_IsInPrivateModeEnabled(_settings['private_mode'])
-        props.AdditionalBrowserArguments = '--disable-features=ElasticOverscroll'
-
-        if webview_settings['ALLOW_FILE_URLS']:
-            props.AdditionalBrowserArguments += ' --allow-file-access-from-files'
-
-        self.webview.CreationProperties = props
-
         self.form = form
         form.Controls.Add(self.webview)
 
@@ -70,17 +60,18 @@ class EdgeChrome:
         self.ishtml = False
         self.html = DEFAULT_HTML
 
-        if _settings['storage_path']:
-            self.setup_webview2_environment()
-        else:
-            self.webview.EnsureCoreWebView2Async(None)
+        self.setup_webview2_environment()
 
     def setup_webview2_environment(self):
         def _callback(task):
             self.webview.EnsureCoreWebView2Async(task.Result)
 
+        opts = CoreWebView2EnvironmentOptions()
+        opts.AdditionalBrowserArguments = '--disable-features=ElasticOverscroll --disable-web-security --unsafely-treat-insecure-origin-as-secure --allow-file-access-from-files'
+
         environment = CoreWebView2Environment.CreateAsync(
-            userDataFolder=_settings['storage_path']
+            userDataFolder=_settings['storage_path'],
+            options=opts
         )
         environment.ContinueWith(
             Action[Task[CoreWebView2Environment]](_callback),
@@ -160,10 +151,15 @@ class EdgeChrome:
             self.webview.CoreWebView2.NavigateToString(self.html)
         else:
             self.webview.EnsureCoreWebView2Async(None)
+            self.webview.CoreWebView2.NavigateToString(self.html)
 
     def load_url(self, url):
         self.ishtml = False
-        self.webview.Source = Uri(url)
+        if self.webview.CoreWebView2:
+            self.webview.CoreWebView2.Navigate(url)
+        else:
+            self.webview.EnsureCoreWebView2Async(None)
+            self.webview.CoreWebView2.Navigate(url)
 
     def on_certificate_error(self, _, args):
         args.set_Action(CoreWebView2ServerCertificateErrorAction.AlwaysAllow)
@@ -211,6 +207,17 @@ class EdgeChrome:
         self.url = sender.Source
         self.ishtml = False
 
+    def on_context_menu_requested(self, sender, args):
+        menuList = args.MenuItems
+        context = args.ContextMenuTarget.Kind
+
+        if _settings['debug']:
+            return
+
+        for i in range(menuList.Count - 1, -1, -1):  # 从后往前遍历
+            if menuList[i].Name not in ['cut','copy','paste','selectAll','undo','redo','emoji'] or menuList[i].Label.startWith('语音输入'):
+                menuList.RemoveAt(i)
+
     def on_webview_ready(self, sender, args):
         if not args.IsSuccess:
             logger.error(
@@ -221,6 +228,7 @@ class EdgeChrome:
 
         self.webview.CoreWebView2.SourceChanged += self.on_source_changed
         sender.CoreWebView2.NewWindowRequested += self.on_new_window_request
+        sender.CoreWebView2.ContextMenuRequested += self.on_context_menu_requested
 
         if _settings['ssl']:
             sender.CoreWebView2.ServerCertificateErrorDetected += self.on_certificate_error
@@ -229,7 +237,7 @@ class EdgeChrome:
 
         settings = sender.CoreWebView2.Settings
         settings.AreBrowserAcceleratorKeysEnabled = _settings['debug']
-        settings.AreDefaultContextMenusEnabled = _settings['debug']
+        settings.AreDefaultContextMenusEnabled = True
         settings.AreDefaultScriptDialogsEnabled = True
         settings.AreDevToolsEnabled = _settings['debug']
         settings.IsBuiltInErrorPageEnabled = True
@@ -240,7 +248,8 @@ class EdgeChrome:
         settings.IsZoomControlEnabled = True
 
         if _settings['user_agent']:
-            settings.UserAgent = _settings['user_agent']
+            settings.UserAgent = _settings['user_agent'] + " " + settings.UserAgent
+            logging.info(settings.UserAgent)
 
         if _settings['private_mode']:
             # cookies persist even if UserDataFolder is in memory. We have to delete cookies manually.

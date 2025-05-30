@@ -61,6 +61,37 @@ logger.debug('Using Cocoa')
 renderer = 'wkwebview'
 
 
+def position_traffic_lights(window, x, y):
+    # 获取三个标准按钮
+    close_button = window.standardWindowButton_(AppKit.NSWindowCloseButton)
+    miniaturize_button = window.standardWindowButton_(AppKit.NSWindowMiniaturizeButton)
+    zoom_button = window.standardWindowButton_(AppKit.NSWindowZoomButton)
+
+    # 获取按钮的父视图（实际上是标题栏容器视图的父视图）
+    title_bar_container_view = close_button.superview().superview()
+
+    # 获取关闭按钮的 frame 来计算高度
+    close_rect = close_button.frame()
+    button_height = close_rect.size.height
+
+    # 设置标题栏容器视图的新 frame
+    title_bar_frame_height = button_height + y
+    title_bar_rect = title_bar_container_view.frame()
+    title_bar_rect.size.height = title_bar_frame_height
+    title_bar_rect.origin.y = window.frame().size.height - title_bar_frame_height
+    title_bar_container_view.setFrame_(title_bar_rect)
+
+    # 计算按钮间距
+    space_between = miniaturize_button.frame().origin.x - close_button.frame().origin.x
+
+    # 遍历所有按钮并设置新位置
+    window_buttons = [close_button, miniaturize_button, zoom_button]
+    for i, button in enumerate(window_buttons):
+        rect = button.frame()
+        rect.origin.x = x + (i * space_between)
+        button.setFrameOrigin_(rect.origin)
+
+
 class BrowserView:
     instances = {}
     app = AppKit.NSApplication.sharedApplication()
@@ -167,7 +198,8 @@ class BrowserView:
                 AppKit.NSApplicationActivateIgnoringOtherApps
             )
             alert = AppKit.NSAlert.alloc().init()
-            alert.setInformativeText_(str(message))
+            alert.setMessageText_(str(message))
+            alert.setInformativeText_("")
             alert.runModal()
 
             if not handler.__block_signature__:
@@ -542,6 +574,11 @@ class BrowserView:
             pass  # backspaceKeyNavigationEnabled does not exist prior to macOS Mojave
 
         config.preferences().setValue_forKey_(webview_settings['ALLOW_FILE_URLS'], 'allowFileAccessFromFileURLs')
+        try:
+            config.preferences().setValue_forKey_(webview_settings['ALLOW_FILE_URLS'], 'allowUniversalAccessFromFileURLs')
+        except KeyError:
+            pass  # backspaceKeyNavigationEnabled does not exist prior to macOS Mojave
+        config.preferences().setValue_forKey_(False, 'webSecurityEnabled')
 
         if _settings['debug'] and webview_settings['OPEN_DEVTOOLS_IN_DEBUG']:
             config.preferences().setValue_forKey_(True, 'developerExtrasEnabled')
@@ -569,6 +606,8 @@ class BrowserView:
             self.webview.setValue_forKey_(True, 'drawsTransparentBackground')
         else:
             self.window.setBackgroundColor_(BrowserView.nscolor_from_hex(window.background_color))
+            if window.background_color == '#000000':
+                self.window.setAppearance_(AppKit.NSAppearance.appearanceNamed_("NSAppearanceNameDarkAqua"))
 
         if window.vibrancy:
             frame_vibrancy = AppKit.NSMakeRect(0, 0, frame.size.width, frame.size.height)
@@ -588,12 +627,25 @@ class BrowserView:
         self.easy_drag = window.easy_drag
 
         if window.frameless:
+            # print("window.frameless",window.frameless)
             # Make content full size and titlebar transparent
             self.window.setTitlebarAppearsTransparent_(True)
             self.window.setTitleVisibility_(NSWindowTitleHidden)
-            self.window.standardWindowButton_(AppKit.NSWindowCloseButton).setHidden_(True)
-            self.window.standardWindowButton_(AppKit.NSWindowMiniaturizeButton).setHidden_(True)
-            self.window.standardWindowButton_(AppKit.NSWindowZoomButton).setHidden_(True)
+            if type(window.frameless)  == type([1]):
+                self.window.standardWindowButton_(AppKit.NSWindowCloseButton).setHidden_(False)
+                self.window.standardWindowButton_(AppKit.NSWindowMiniaturizeButton).setHidden_(False)
+                self.window.standardWindowButton_(AppKit.NSWindowZoomButton).setHidden_(False)
+                position_traffic_lights(self.window, window.frameless[0], window.frameless[1]+5)
+                window.events.resized += lambda width, height: AppHelper.callAfter(
+                    lambda: position_traffic_lights(self.window, window.frameless[0], window.frameless[1] + 5))
+            elif window.frameless == 2:
+                self.window.standardWindowButton_(AppKit.NSWindowCloseButton).setHidden_(False)
+                self.window.standardWindowButton_(AppKit.NSWindowMiniaturizeButton).setHidden_(False)
+                self.window.standardWindowButton_(AppKit.NSWindowZoomButton).setHidden_(False)
+            else:
+                self.window.standardWindowButton_(AppKit.NSWindowCloseButton).setHidden_(True)
+                self.window.standardWindowButton_(AppKit.NSWindowMiniaturizeButton).setHidden_(True)
+                self.window.standardWindowButton_(AppKit.NSWindowZoomButton).setHidden_(True)
         else:
             # Set the titlebar color (so that it does not change with the window color)
             self.window.contentView().superview().subviews().lastObject().setBackgroundColor_(

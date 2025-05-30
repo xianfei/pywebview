@@ -179,6 +179,14 @@ def inject_pywebview(window: Window, platform: str) -> str:
 
     try:
         func_list = generate_func()
+        func_list.append({'func': '_webview_minimize', 'params': []})
+        func_list.append({'func': '_webview_maximize', 'params': []})
+        func_list.append({'func': '_webview_restore', 'params': []})
+        func_list.append({'func': '_webview_close', 'params': []})
+        window._functions['_webview_minimize'] = window.minimize
+        window._functions['_webview_maximize'] = window.maximize
+        window._functions['_webview_restore'] = window.restore
+        window._functions['_webview_close'] = window.destroy
     except Exception as e:
         logger.exception(e)
         func_list = []
