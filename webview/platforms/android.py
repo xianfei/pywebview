@@ -11,13 +11,14 @@ from kivy.clock import Clock
 from jnius import autoclass, cast, java_method, PythonJavaClass
 from android.runnable import Runnable, run_on_ui_thread
 
-from webview import _settings, settings
+from webview import _state, settings
 from webview.util import create_cookie, js_bridge_call, inject_pywebview
 
 AlertDialogBuilder = autoclass('android.app.AlertDialog$Builder')
 AndroidString = autoclass('java.lang.String')
 CookieManager = autoclass('android.webkit.CookieManager')
 WebViewA = autoclass('android.webkit.WebView')
+View = autoclass('android.view.View')
 KeyEvent = autoclass('android.view.KeyEvent')
 PyWebViewClient = autoclass('com.pywebview.PyWebViewClient')
 PyWebChromeClient = autoclass('com.pywebview.PyWebChromeClient')
@@ -109,24 +110,20 @@ class BrowserView(Widget):
         super(BrowserView, self).__init__(**kwargs)
         self.window.native = self
         Clock.schedule_once(lambda dt: run_ui_thread(self.create_webview), 0)
+        self.is_fullscreen = False
 
     def create_webview(self, *args):
         def js_api_handler(func, params, id):
             js_bridge_call(self.window, func, json.loads(params), id)
-
-        def loaded_callback(event, data):
-            self.window.events.loaded.set()
 
         def chrome_callback(event, data):
             print(event, data)
 
         def webview_callback(event, data):
             if event == 'onPageFinished':
-                value_callback = JavascriptValueCallback()
-                value_callback.setCallback(EventCallbackWrapper(loaded_callback))
-                self.webview.evaluateJavascript(inject_pywebview(self.window, renderer), value_callback)
+                inject_pywebview(renderer, self.window)
 
-                if not _settings['private_mode']:
+                if not _state['private_mode']:
                     CookieManager.getInstance().setAcceptCookie(True)
                     CookieManager.getInstance().acceptCookie()
                     CookieManager.getInstance().flush()
@@ -151,14 +148,14 @@ class BrowserView(Widget):
         webview_settings.setLoadWithOverviewMode(True)
         webview_settings.setSupportZoom(self.window.zoomable)
         webview_settings.setBuiltInZoomControls(False)
-        webview_settings.setDomStorageEnabled(not _settings['private_mode'])
+        webview_settings.setDomStorageEnabled(not _state['private_mode'])
 
-        if _settings['user_agent']:
-            webview_settings.setUserAgentString(_settings['user_agent'])
+        if _state['user_agent']:
+            webview_settings.setUserAgentString(_state['user_agent'])
 
         self._webview_callback_wrapper = EventCallbackWrapper(webview_callback)
         webview_client = PyWebViewClient()
-        webview_client.setCallback(self._webview_callback_wrapper, _settings['ssl'])
+        webview_client.setCallback(self._webview_callback_wrapper, _state['ssl'] or settings['IGNORE_SSL_ERRORS'])
         self.webview.setWebViewClient(webview_client)
 
         self._chrome_callback_wrapper = EventCallbackWrapper(chrome_callback)
@@ -184,10 +181,13 @@ class BrowserView(Widget):
         elif self.window.html:
             self.webview.loadDataWithBaseURL(None, self.window.html, 'text/html', 'UTF-8', None)
 
+        if self.window.fullscreen:
+            toggle_fullscreen(self.window)
+
         self.window.events.shown.set()
 
     def dismiss(self):
-        if _settings['private_mode']:
+        if _state['private_mode']:
             self.webview.clearHistory()
             self.webview.clearCache(True)
             self.webview.clearFormData()
@@ -299,23 +299,20 @@ def setup_app():
 
 @run_on_ui_thread
 def load_url(url, _):
-    app.window.events.loaded.clear()
     app.view._cookies = {}
     app.view.webview.loadUrl(url)
 
 
 @run_on_ui_thread
 def load_html(html_content, base_uri, _):
-    app.window.events.loaded.clear()
     app.view._cookies = {}
     app.view.webview.loadDataWithBaseURL(base_uri, html_content, 'text/html', 'UTF-8', None)
 
 
-def evaluate_js(js_code, unique_id):
+def evaluate_js(js_code, _, parse_json=True):
     def callback(event, result):
         nonlocal js_result
-        result = json.loads(result)
-        js_result = json.loads(result) if result else None
+        js_result = json.loads(result) if parse_json and result else result
         lock.release()
 
     def _evaluate_js():
@@ -373,6 +370,7 @@ def get_current_url(_):
     return app.view.getUrl()
 
 def get_screens():
+    logger.warning('Screen information is not supported on Android')
     return []
 
 
@@ -421,8 +419,26 @@ def set_on_top(_, on_top):
     logger.warning('Always on top mode is not supported on Android')
 
 
+@run_on_ui_thread
 def toggle_fullscreen(_):
-    logger.warning('Fullscreen mode is not supported on Android')
+    is_fullscreen = app.view.is_fullscreen
+
+    try:
+        if not is_fullscreen:
+            option = (View.SYSTEM_UI_FLAG_FULLSCREEN |
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY |
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN)
+            app.view.webview.setSystemUiVisibility(option)
+            app.view.is_fullscreen = True
+        else:
+            option = View.SYSTEM_UI_FLAG_VISIBLE
+            app.view.webview.setSystemUiVisibility(option)
+            app.view.is_fullscreen = False
+    except Exception as e:
+        logger.error(f"Error toggling fullscreen: {e}")
 
 
 def add_tls_cert(certfile):

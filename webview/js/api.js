@@ -3,11 +3,11 @@ window.pywebview = {
   platform: '%(platform)s',
   api: {},
   _eventHandlers: {},
-  _returnValues: {},
+  _returnValuesCallbacks: {},
 
   _createApi: function (funcList) {
     function sanitize_params(params) {
-      var reservedWords = (filtered_js_reserved_words = [
+      var reservedWords = [
         'case',
         'catch',
         'const',
@@ -31,7 +31,7 @@ window.pywebview = {
         'typeof',
         'var',
         'void',
-      ]);
+      ];
 
       for (var i = 0; i < params.length; i++) {
         var param = params[i];
@@ -76,7 +76,7 @@ window.pywebview = {
         sanitize_params(params),
         funcBody
       );
-      window.pywebview._returnValues[funcName] = {};
+      window.pywebview._returnValuesCallbacks[funcName] = {};
     }
   },
 
@@ -86,7 +86,7 @@ window.pywebview = {
       case 'cef':
       case 'qtwebkit':
       case 'android-webkit':
-        return window.external.call(funcName, pywebview._stringify(params), id);
+        return window.external.call(funcName, pywebview.stringify(params), id);
       case 'edgechromium':
         // Full file path support for WebView2
         if (
@@ -101,14 +101,14 @@ window.pywebview = {
         }
         return window.chrome.webview.postMessage([
           funcName,
-          pywebview._stringify(params),
+          pywebview.stringify(params),
           id,
         ]);
       case 'cocoa':
       case 'gtkwebkit2':
         return window.webkit.messageHandlers.jsBridge.postMessage(
-          pywebview._stringify(
-            { funcName: funcName, params: params, id: id },
+          pywebview.stringify(
+            { funcName: funcName, params: params, id: id }
           )
         );
       case 'qtwebengine':
@@ -116,14 +116,14 @@ window.pywebview = {
           setTimeout(function () {
             window.pywebview._QWebChannel.objects.external.call(
               funcName,
-              pywebview._stringify(params),
+              pywebview.stringify(params),
               id
             );
           }, 100);
         } else {
           window.pywebview._QWebChannel.objects.external.call(
             funcName,
-            pywebview._stringify(params),
+            pywebview.stringify(params),
             id
           );
         }
@@ -134,27 +134,23 @@ window.pywebview = {
   },
 
   _checkValue: function (funcName, resolve, reject, id) {
-    var check = setInterval(function () {
-      var returnObj = window.pywebview._returnValues[funcName][id];
-      if (returnObj) {
-        var value = returnObj.value;
-        var isError = returnObj.isError;
+    window.pywebview._returnValuesCallbacks[funcName][id] = function(returnObj) {
+      var value = returnObj.value;
+      var isError = returnObj.isError;
 
-        delete window.pywebview._returnValues[funcName][id];
-        clearInterval(check);
+      delete window.pywebview._returnValuesCallbacks[funcName][id];
 
-        if (isError) {
-          var pyError = JSON.parse(value);
-          var error = new Error(pyError.message);
-          error.name = pyError.name;
-          error.stack = pyError.stack;
+      if (isError) {
+        var pyError = JSON.parse(value);
+        var error = new Error(pyError.message);
+        error.name = pyError.name;
+        error.stack = pyError.stack;
 
-          reject(error);
-        } else {
-          resolve(JSON.parse(value));
-        }
+        reject(error);
+      } else {
+        resolve(JSON.parse(value));
       }
-    }, 1);
+    };
   },
   _asyncCallback: function (result, id) {
     window.pywebview._jsApiCallback('pywebviewAsyncCallback', result, id);
@@ -167,7 +163,7 @@ window.pywebview = {
     );
   },
 
-  _stringify: function stringify(obj, timing) {
+  stringify: function stringify(obj, timing) {
     function tryConvertToArray(obj) {
       try {
         return Array.prototype.slice.call(obj);
@@ -322,11 +318,8 @@ window.pywebview = {
       var args = arguments;
       clearTimeout(timeout);
       timeout = setTimeout(function () {
-        debugger;
         func.apply(context, args);
       }, delay);
     };
   },
 };
-
-window.pywebview._createApi(JSON.parse('%(func_list)s'));

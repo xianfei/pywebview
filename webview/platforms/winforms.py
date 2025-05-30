@@ -12,7 +12,7 @@ from threading import Event, Semaphore
 
 import clr
 
-from webview import FOLDER_DIALOG, OPEN_DIALOG, SAVE_DIALOG, _settings, windows
+from webview import FOLDER_DIALOG, OPEN_DIALOG, SAVE_DIALOG, _state, windows
 from webview.guilib import forced_gui_
 from webview.menu import Menu, MenuAction, MenuSeparator
 from webview.screen import Screen
@@ -29,6 +29,7 @@ from System import Environment, Func, Int32, IntPtr, Type, UInt32, Array, Object
 from System.Drawing import Color, ColorTranslator, Icon, Point, Size, SizeF
 from System.Threading import ApartmentState, Thread, ThreadStart
 from System.Reflection import Assembly, BindingFlags
+from Microsoft.Win32 import SystemEvents
 
 kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
 logger = logging.getLogger('pywebview')
@@ -181,16 +182,18 @@ class BrowserView:
 
             if window.initial_x is not None and window.initial_y is not None:
                 self.StartPosition = WinForms.FormStartPosition.Manual
-                self.Location = Point(window.initial_x, window.initial_y)
+                self.Location = Point(
+                    int(window.initial_x * self.scale_factor),
+                    int(window.initial_y * self.scale_factor)
+                )
             elif window.screen:
                 self.StartPosition = WinForms.FormStartPosition.Manual
                 x = int(
-                    window.screen.frame.X * self.scale_factor + (window.screen.width - window.initial_width) * self.scale_factor / 2
-                    if window.screen.frame.X >= 0
-                    else window.screen.frame.X * self.scale_factor - window.screen.width * self.scale_factor / 2
+                    window.screen.x * self.scale_factor + (window.screen.width - window.initial_width) * self.scale_factor / 2
+                    if window.screen.x >= 0
+                    else window.screen.X * self.scale_factor + window.screen.width / 2
                 )
-
-                y = int(window.screen.frame.Y * self.scale_factor + (window.screen.height - window.initial_height) * self.scale_factor / 2)
+                y = int(window.screen.y * self.scale_factor + (window.screen.height - window.initial_height) * self.scale_factor / 2)
                 self.Location = Point(x, y)
             else:
                 self.StartPosition = WinForms.FormStartPosition.CenterScreen
@@ -225,7 +228,7 @@ class BrowserView:
             if window.fullscreen:
                 self.toggle_fullscreen()
 
-            if window.shadow:
+            if window.shadow and not window.transparent:
                 # Should do this before set frameless
                 ExtendFrameIntoClientArea(self.Handle.ToInt32())
                 DwmSetWindowAttribute(self.Handle.ToInt32(), 2, 2, 4)
@@ -269,8 +272,40 @@ class BrowserView:
 
             self.localization = window.localization
 
+            self.update_title_bar_theme()
+            SystemEvents.UserPreferenceChanged += self.on_system_theme_changed
+
         def __str__(self):
             return f'<System.Windows.Forms object with {self.Handle} handle>'
+
+        def on_system_theme_changed(self, sender, e):
+            self.update_title_bar_theme()
+
+        def update_title_bar_theme(self):
+            if self.is_dark_theme():
+                DwmSetWindowAttribute(self.Handle.ToInt32(), 20, 1)
+                DwmSetWindowAttribute(self.Handle.ToInt32(), 38, 2)
+            else:
+                DwmSetWindowAttribute(self.Handle.ToInt32(), 20, 0)
+                DwmSetWindowAttribute(self.Handle.ToInt32(), 38, 1)
+
+        def is_dark_theme(self):
+            try:
+                personalize_key = winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+                    0,
+                    winreg.KEY_READ
+                )
+                system_theme, _ = winreg.QueryValueEx(personalize_key, "SystemUsesLightTheme")
+                winreg.CloseKey(personalize_key)
+                if system_theme == 0:
+                    return True
+                else:
+                    return False
+            except Exception as e:
+                logger.error(f'Error while getting system theme: {e}')
+                return None
 
         def on_activated(self, *_):
             if not self.pywebview_window.focus:
@@ -285,6 +320,10 @@ class BrowserView:
             def _shutdown():
                 if is_cef:
                     CEF.shutdown()
+                elif is_chromium:
+                    self.hide()
+                    self.browser.clear_user_data()
+
                 WinForms.Application.Exit()
 
             if not is_cef:
@@ -345,24 +384,9 @@ class BrowserView:
         def on_move(self, sender, args):
             self.pywebview_window.events.moved.set(self.Location.X, self.Location.Y)
 
-        def evaluate_js(self, script):
-            def _evaluate_js():
-                self.browser.evaluate_js(
-                    script, semaphore, js_result
-                ) if is_chromium else self.browser.evaluate_js(script)
-
-            semaphore = Semaphore(0)
-            js_result = []
-
-            self.loaded.wait()
-            self.Invoke(Func[Type](_evaluate_js))
-            semaphore.acquire()
-
-            if is_chromium:
-                result = js_result.pop()
-                return result
-
-            return self.browser.js_result
+        def evaluate_js(self, script, parse_json):
+            result = self.browser.evaluate_js(script, parse_json)
+            return result
 
         def clear_cookies(self):
             def _clear_cookies():
@@ -382,8 +406,6 @@ class BrowserView:
             if not is_chromium:
                 logger.error('get_cookies() is not implemented for this platform')
                 return cookies
-
-            self.loaded.wait()
 
             semaphore = Semaphore(0)
 
@@ -632,14 +654,14 @@ _already_set_up_app = False
 def init_storage():
     global cache_dir
 
-    if not _settings['private_mode'] or _settings['storage_path']:
+    if not _state['private_mode'] or _state['storage_path']:
         try:
             data_folder = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)
 
             if not os.access(data_folder, os.W_OK):
                 data_folder = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
 
-            cache_dir = _settings['storage_path'] or os.path.join(data_folder, 'pywebview')
+            cache_dir = _state['storage_path'] or os.path.join(data_folder, 'pywebview')
 
             if not os.path.exists(cache_dir):
                 os.makedirs(cache_dir)
@@ -815,8 +837,6 @@ def load_url(url, uid):
     if not i:
         return
 
-    i.loaded.clear()
-
     if is_cef:
         CEF.load_url(url, uid)
     else:
@@ -928,13 +948,13 @@ def destroy_window(uid):
         i.browser.js_result_semaphore.release()
 
 
-def evaluate_js(script, uid, result_id=None):
+def evaluate_js(script, uid, parse_json, result_id=None):
     if is_cef:
-        return CEF.evaluate_js(script, result_id, uid)
+        return CEF.evaluate_js(script, result_id, parse_json, uid)
 
     i = BrowserView.instances.get(uid)
     if i:
-        return i.evaluate_js(script)
+        return i.evaluate_js(script, parse_json)
 
 
 def get_position(uid):
@@ -951,7 +971,7 @@ def get_size(uid):
 
 
 def get_screens():
-    screens = [Screen(s.Bounds.Width, s.Bounds.Height, s.WorkingArea) for s in WinForms.Screen.AllScreens]
+    screens = [Screen(s.Bounds.X, s.Bounds.Y, s.Bounds.Width, s.Bounds.Height, s.WorkingArea) for s in WinForms.Screen.AllScreens]
     return screens
 
 
